@@ -1,4 +1,4 @@
-module github.com/miya-masa/onamaeddns-go
+module github.com/miya-masa/onamae-go
 
 go 1.16
 

@@ -1,7 +1,13 @@
 # onamae DDNS go
 
+## INSTALL
+
+```
+go get github.com/miya-masa/onamae-go
+```
+
 ## USAGE
 
 ```
-go get github/miya-masa/onamae-go
+onammae-go -h
 ```
