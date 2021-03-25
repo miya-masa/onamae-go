@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -8,7 +9,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -26,20 +29,69 @@ type Input struct {
 	Hostname string `validate:"required"`
 	Domain   string `validate:"required"`
 	IP4      string `validate:"required"`
+
+	Daemon   bool   `validate:"required"`
+	Interval string `validate:"omitempty"`
 }
 
 var input Input
 
 func init() {
-	flag.StringVar(&input.Username, "u", "", "username onamae.com.  env:$ONAMAE_USERNAME")
-	flag.StringVar(&input.Password, "p", "", "password onamae.com env:$ONAMAE_PASSWORD")
-	flag.StringVar(&input.Hostname, "h", "", "hostname. ex. www")
-	flag.StringVar(&input.Domain, "d", "", "domain. ex. example.com")
-	flag.StringVar(&input.IP4, "i", "", "ip address. If empty, will get it automatically using `https://httpbin.org/ip`")
+	flag.StringVar(&input.Username, "u", "", "Username onamae.com.env:$ONAMAE_USERNAME")
+	flag.StringVar(&input.Password, "p", "", "Password onamae.com env:$ONAMAE_PASSWORD")
+	flag.StringVar(&input.Hostname, "h", "", "Hostname. ex. www")
+	flag.StringVar(&input.Domain, "d", "", "Domain. ex. example.com")
+	flag.StringVar(&input.IP4, "i", "", "IP address. If empty, will get it automatically using `https://httpbin.org/ip`")
+	flag.BoolVar(&input.Daemon, "daemon", false, "Launch as daemon")
+	flag.StringVar(&input.Interval, "interval", "5m", "Update interval. Enable only for daemon mode")
 	flag.Parse()
 }
 
 func main() {
+	ctx := context.Background()
+	if !input.Daemon {
+		err := execute(ctx, input)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	interval, err := time.ParseDuration(input.Interval)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	doneCh := make(chan struct{})
+	go func() {
+		defer cancel()
+		<-sigCh
+	}()
+	go func() {
+		defer close(doneCh)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				return
+			}
+			if err := execute(ctx, input); err != nil {
+				log.Print(err)
+			}
+		}
+	}()
+	<-doneCh
+}
+
+func execute(ctx context.Context, input Input) error {
 	if input.Username == "" {
 		input.Username = os.Getenv("ONAMAE_USERNAME")
 	}
@@ -50,24 +102,24 @@ func main() {
 		log.Println("get automatically")
 		resp, err := http.Get("https://httpbin.org/ip")
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		defer resp.Body.Close()
 		obj := map[string]interface{}{}
 		if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
-			log.Fatal(err)
+			return err
 		}
 		input.IP4 = obj["origin"].(string)
 
 	}
 	v := validator.New()
 	if err := v.Struct(input); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	client, err := tls.Dial("tcp", ONAMAE_SERVER, nil)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	resCh := make(chan error)
 	exp, _, err := expect.SpawnGeneric(&expect.GenOptions{
@@ -83,16 +135,13 @@ func main() {
 		Check: func() bool { return true },
 	}, time.Second, expect.Verbose(true))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	login(exp, input.Username, input.Password)
 	modify(exp, input.Hostname, input.Domain, input.IP4)
 	logout(exp)
-
-	if err := exp.Close(); err != nil {
-		panic(err)
-	}
+	return exp.Close()
 }
 
 func login(exp *expect.GExpect, username, password string) {
