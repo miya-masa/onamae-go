@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,7 +31,7 @@ type Input struct {
 	Domain   string `validate:"required"`
 	IP4      string `validate:"required"`
 
-	Daemon   bool   `validate:"required"`
+	Daemon   bool   `validate:"omitempty"`
 	Interval string `validate:"omitempty"`
 }
 
@@ -43,8 +44,11 @@ func init() {
 	flag.StringVar(&input.Domain, "d", "", "Domain. ex. example.com")
 	flag.StringVar(&input.IP4, "i", "", "IP address. If empty, will get it automatically using `https://httpbin.org/ip`")
 	flag.BoolVar(&input.Daemon, "daemon", false, "Launch as daemon")
-	flag.StringVar(&input.Interval, "interval", "5m", "Update interval. Enable only for daemon mode")
+	flag.StringVar(&input.Interval, "interval", "1m", "Update interval. Enable only for daemon mode")
 	flag.Parse()
+
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.LstdFlags)
 }
 
 func main() {
@@ -84,12 +88,15 @@ func main() {
 				return
 			}
 			if err := execute(ctx, input); err != nil {
-				log.Print(err)
+				log.Fatal(err)
+				return
 			}
 		}
 	}()
 	<-doneCh
 }
+
+var previousIPV4 string
 
 func execute(ctx context.Context, input Input) error {
 	if input.Username == "" {
@@ -99,7 +106,6 @@ func execute(ctx context.Context, input Input) error {
 		input.Password = os.Getenv("ONAMAE_PASSWORD")
 	}
 	if input.IP4 == "" {
-		log.Println("get automatically")
 		resp, err := http.Get("https://httpbin.org/ip")
 		if err != nil {
 			return err
@@ -110,11 +116,16 @@ func execute(ctx context.Context, input Input) error {
 			return err
 		}
 		input.IP4 = obj["origin"].(string)
-
+		log.Printf("Got ipv4 %s\n", input.IP4)
 	}
 	v := validator.New()
 	if err := v.Struct(input); err != nil {
 		return err
+	}
+
+	if previousIPV4 != "" && previousIPV4 == input.IP4 {
+		log.Println("Skip. Because no change")
+		return nil
 	}
 
 	client, err := tls.Dial("tcp", ONAMAE_SERVER, nil)
@@ -133,39 +144,79 @@ func execute(ctx context.Context, input Input) error {
 			return client.Close()
 		},
 		Check: func() bool { return true },
-	}, time.Second, expect.Verbose(true))
+	}, time.Second, expect.Verbose(false))
 	if err != nil {
 		return err
 	}
 
-	login(exp, input.Username, input.Password)
-	modify(exp, input.Hostname, input.Domain, input.IP4)
-	logout(exp)
+	if err := login(exp, input.Username, input.Password); err != nil {
+		return err
+	}
+
+	if err := modify(exp, input.Hostname, input.Domain, input.IP4); err != nil {
+		return err
+	}
+
+	if err := logout(exp); err != nil {
+		return err
+	}
+	previousIPV4 = input.IP4
+	log.Print("Succeeded")
 	return exp.Close()
 }
 
-func login(exp *expect.GExpect, username, password string) {
-	exp.Send(fmt.Sprintf(`LOGIN
+func login(exp *expect.GExpect, username, password string) error {
+	if err := exp.Send(fmt.Sprintf(`LOGIN
 USERID:%s
 PASSWORD:%s
 .
-`, username, password))
-	exp.Expect(regexp.MustCompile(`\d{3}`), time.Second*10)
+`, username, password)); err != nil {
+		return err
+	}
+
+	message, _, err := exp.Expect(regexp.MustCompile(`\d{3}`), time.Second*10)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(message, "SUCCESSFUL") {
+		return fmt.Errorf("fail login %s", message)
+	}
+	return nil
 }
 
-func logout(exp *expect.GExpect) {
-	exp.Send(`LOGOUT
+func logout(exp *expect.GExpect) error {
+	if err := exp.Send(`LOGOUT
 .
-`)
-	exp.Expect(regexp.MustCompile(`\d{3}`), time.Second*10)
+`); err != nil {
+		return err
+	}
+
+	message, _, err := exp.Expect(regexp.MustCompile(`\d{3}`), time.Second*10)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(message, "SUCCESSFUL") {
+		return fmt.Errorf("fail logout %s", message)
+	}
+	return nil
 }
 
-func modify(exp *expect.GExpect, hostname, domainname, ipv4 string) {
-	exp.Send(fmt.Sprintf(`MODIP
+func modify(exp *expect.GExpect, hostname, domainname, ipv4 string) error {
+	if err := exp.Send(fmt.Sprintf(`MODIP
 HOSTNAME:%s
 DOMNAME:%s
 IPV4:%s
 .
-`, hostname, domainname, ipv4))
-	exp.Expect(regexp.MustCompile(`\d{3}`), time.Second*10)
+`, hostname, domainname, ipv4)); err != nil {
+		return err
+	}
+
+	message, _, err := exp.Expect(regexp.MustCompile(`\d{3}`), time.Second*10)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(message, "SUCCESSFUL") {
+		return fmt.Errorf("fail modify %s", message)
+	}
+	return nil
 }
