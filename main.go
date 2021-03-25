@@ -31,8 +31,8 @@ type Input struct {
 	Domain   string `validate:"required"`
 	IP4      string `validate:"required"`
 
-	Daemon   bool   `validate:"omitempty"`
-	Interval string `validate:"omitempty"`
+	Daemon   bool          `validate:"omitempty"`
+	Interval time.Duration `validate:"omitempty"`
 }
 
 var input Input
@@ -44,7 +44,7 @@ func init() {
 	flag.StringVar(&input.Domain, "d", "", "Domain. ex. example.com")
 	flag.StringVar(&input.IP4, "i", "", "IP address. If empty, will get it automatically using `https://httpbin.org/ip`")
 	flag.BoolVar(&input.Daemon, "daemon", false, "Launch as daemon")
-	flag.StringVar(&input.Interval, "interval", "1m", "Update interval. Enable only for daemon mode")
+	flag.DurationVar(&input.Interval, "interval", time.Minute, "Update interval. Enable only for daemon mode")
 	flag.Parse()
 
 	log.SetOutput(os.Stdout)
@@ -61,12 +61,6 @@ func main() {
 		return
 	}
 
-	interval, err := time.ParseDuration(input.Interval)
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -79,7 +73,7 @@ func main() {
 	}()
 	go func() {
 		defer close(doneCh)
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(input.Interval)
 		defer ticker.Stop()
 		for {
 			select {
