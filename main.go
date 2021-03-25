@@ -66,28 +66,23 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	doneCh := make(chan struct{})
 	go func() {
 		defer cancel()
 		<-sigCh
 	}()
-	go func() {
-		defer close(doneCh)
-		ticker := time.NewTicker(input.Interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-			case <-ctx.Done():
-				return
-			}
-			if err := execute(ctx, input); err != nil {
-				log.Fatal(err)
-				return
-			}
+	ticker := time.NewTicker(input.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
 		}
-	}()
-	<-doneCh
+		if err := execute(ctx, input); err != nil {
+			log.Fatal(err)
+			return
+		}
+	}
 }
 
 var previousIPV4 string
